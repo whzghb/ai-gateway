@@ -328,6 +328,9 @@ func (s *Server) setBackend(ctx context.Context, p Processor, reqID string, req 
 		return nil, status.Error(codes.Internal, "missing xds.upstream_host_metadata in request")
 	}
 
+	// envoy-gateway-system envoy-default-envoy-ai-gateway-basic-21a9f8f8-78f8c854d4-zg9m5 ai-gateway-extproc string_value:"filter_metadata { key: \"envoy-gateway\" value { fields { key: \"resources\" value { list_value { values { struct_value { fields { key: \"kind\" value { string_value: \"Backend\" } } fields { key: \"name\" value { string_value: \"envoy-ai-gateway-basic-aws\" } } fields { key: \"namespace\" value { string_value: \"default\" } } } } } } } } }"
+	fmt.Println(attributes.Fields["xds.upstream_host_locality_metadata"])
+
 	// Unmarshal the text into the struct since the metadata is encoded as a proto string.
 	var metadata corev3.Metadata
 	err := prototext.Unmarshal([]byte(hostMetadata.GetStringValue()), &metadata)

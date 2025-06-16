@@ -239,7 +239,15 @@ func (s *Server) maybeModifyCluster(cluster *clusterv3.Cluster) {
 
 	extProcConfig := &extprocv3http.ExternalProcessor{}
 	extProcConfig.AllowModeOverride = true
-	extProcConfig.RequestAttributes = []string{"xds.upstream_host_metadata"}
+	extProcConfig.RequestAttributes = []string{
+		"xds.upstream_host_metadata",
+		// This metadata has been added in https://github.com/envoyproxy/envoy/pull/39604 which is only available
+		// in the main branch as of 16th June 2025, expected to be released in Envoy v1.35 as well as EG v1.5.
+		//
+		// Together with https://github.com/envoyproxy/gateway/pull/5875, we will no longer need to have the entire
+		// metadata construction above (which eventually means k8s Service can be also the target of AIServiceBackend).
+		"xds.upstream_host_locality_metadata",
+	}
 	extProcConfig.ProcessingMode = &extprocv3http.ProcessingMode{
 		RequestHeaderMode: extprocv3http.ProcessingMode_SEND,
 		// At the upstream filter, it can access the original body in its memory, so it can perform the translation
