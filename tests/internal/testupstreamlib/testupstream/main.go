@@ -161,6 +161,19 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	contentLength := r.Header.Get("Content-Length")
+	if contentLength != "" && len(requestBody) != 0 {
+		cl, _ := strconv.Atoi(contentLength)
+		if cl != len(requestBody) {
+			logger.Printf("unexpected Content-Length: got %d, expected %d\n", len(requestBody), cl)
+			http.Error(w, "unexpected Content-Length: got "+strconv.Itoa(len(requestBody))+", expected "+contentLength, http.StatusBadRequest)
+			return
+		}
+		logger.Println("Content-Length matched:", contentLength)
+	} else {
+		logger.Println("no Content-Length header")
+	}
+
 	if expectedReqBody := r.Header.Get(testupstreamlib.ExpectedRequestBodyHeaderKey); expectedReqBody != "" {
 		var expectedBody []byte
 		expectedBody, err = base64.StdEncoding.DecodeString(expectedReqBody)
