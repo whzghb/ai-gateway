@@ -189,7 +189,7 @@ static_resources:
                   - xds.upstream_host_metadata
                 processing_mode:
                   request_header_mode: "SEND"
-                  request_body_mode: "NONE"
+                  request_body_mode: "BUFFERED"
                   response_header_mode: "SKIP"
                   response_body_mode: "NONE"
                 grpc_service:
@@ -234,12 +234,16 @@ static_resources:
                   - xds.upstream_host_metadata
                 processing_mode:
                   request_header_mode: "SEND"
-                  request_body_mode: "NONE"
+                  request_body_mode: "BUFFERED"
                   response_header_mode: "SKIP"
                   response_body_mode: "NONE"
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
+                metadataOptions:
+                  forwardingNamespaces:
+                    untyped:
+                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
@@ -279,12 +283,16 @@ static_resources:
                   - xds.upstream_host_metadata
                 processing_mode:
                   request_header_mode: "SEND"
-                  request_body_mode: "NONE"
+                  request_body_mode: "BUFFERED"
                   response_header_mode: "SKIP"
                   response_body_mode: "NONE"
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
+                metadataOptions:
+                  forwardingNamespaces:
+                    untyped:
+                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
@@ -324,12 +332,16 @@ static_resources:
                   - xds.upstream_host_metadata
                 processing_mode:
                   request_header_mode: "SEND"
-                  request_body_mode: "NONE"
+                  request_body_mode: "BUFFERED"
                   response_header_mode: "SKIP"
                   response_body_mode: "NONE"
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
+                metadataOptions:
+                  forwardingNamespaces:
+                    untyped:
+                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
@@ -380,12 +392,16 @@ static_resources:
                   - xds.upstream_host_metadata
                 processing_mode:
                   request_header_mode: "SEND"
-                  request_body_mode: "NONE"
+                  request_body_mode: "BUFFERED"
                   response_header_mode: "SKIP"
                   response_body_mode: "NONE"
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
+                metadataOptions:
+                  forwardingNamespaces:
+                    untyped:
+                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
@@ -442,12 +458,16 @@ static_resources:
                   - xds.upstream_host_metadata
                 processing_mode:
                   request_header_mode: "SEND"
-                  request_body_mode: "NONE"
+                  request_body_mode: "BUFFERED"
                   response_header_mode: "SKIP"
                   response_body_mode: "NONE"
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
+                metadataOptions:
+                  forwardingNamespaces:
+                    untyped:
+                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
@@ -504,12 +524,16 @@ static_resources:
                   - xds.upstream_host_metadata
                 processing_mode:
                   request_header_mode: "SEND"
-                  request_body_mode: "NONE"
+                  request_body_mode: "BUFFERED"
                   response_header_mode: "SKIP"
                   response_body_mode: "NONE"
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
+                metadataOptions:
+                  forwardingNamespaces:
+                    untyped:
+                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
@@ -574,12 +598,16 @@ static_resources:
                   - xds.upstream_host_metadata
                 processing_mode:
                   request_header_mode: "SEND"
-                  request_body_mode: "NONE"
+                  request_body_mode: "BUFFERED"
                   response_header_mode: "SKIP"
                   response_body_mode: "NONE"
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
+                metadataOptions:
+                  forwardingNamespaces:
+                    untyped:
+                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
