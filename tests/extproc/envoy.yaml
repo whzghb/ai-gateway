@@ -240,10 +240,6 @@ static_resources:
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
-                metadataOptions:
-                  forwardingNamespaces:
-                    untyped:
-                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
@@ -289,10 +285,6 @@ static_resources:
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
-                metadataOptions:
-                  forwardingNamespaces:
-                    untyped:
-                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
@@ -338,10 +330,6 @@ static_resources:
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
-                metadataOptions:
-                  forwardingNamespaces:
-                    untyped:
-                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
@@ -398,10 +386,6 @@ static_resources:
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
-                metadataOptions:
-                  forwardingNamespaces:
-                    untyped:
-                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
@@ -464,10 +448,6 @@ static_resources:
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
-                metadataOptions:
-                  forwardingNamespaces:
-                    untyped:
-                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
@@ -530,10 +510,6 @@ static_resources:
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
-                metadataOptions:
-                  forwardingNamespaces:
-                    untyped:
-                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
@@ -604,10 +580,6 @@ static_resources:
                 grpc_service:
                   envoy_grpc:
                     cluster_name: extproc_cluster
-                metadataOptions:
-                  forwardingNamespaces:
-                    untyped:
-                      - ai_gateway_llm_ns
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
