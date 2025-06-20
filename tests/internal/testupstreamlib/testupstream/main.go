@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -161,17 +162,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	contentLength := r.Header.Get("Content-Length")
-	if contentLength != "" && len(requestBody) != 0 {
-		cl, _ := strconv.Atoi(contentLength)
-		if cl != len(requestBody) {
-			logger.Printf("unexpected Content-Length: got %d, expected %d\n", len(requestBody), cl)
-			http.Error(w, "unexpected Content-Length: got "+strconv.Itoa(len(requestBody))+", expected "+contentLength, http.StatusBadRequest)
-			return
-		}
-		logger.Println("Content-Length matched:", contentLength)
-	} else {
-		logger.Println("no Content-Length header")
+	// At least for the endpoints we want to support, all requests should have a Content-Length header
+	// and should not use chunked transfer encoding.
+	if r.Header.Get("Content-Length") == "" {
+		logger.Println("no Content-Length header, using request body length:", len(requestBody))
+		http.Error(w, "no Content-Length header, using request body length: "+strconv.Itoa(len(requestBody)), http.StatusBadRequest)
+		return
+	}
+	if slices.Contains(r.TransferEncoding, "chunked") {
+		logger.Println("chunked transfer encoding detected")
+		http.Error(w, "chunked transfer encoding is not supported", http.StatusBadRequest)
+		return
 	}
 
 	if expectedReqBody := r.Header.Get(testupstreamlib.ExpectedRequestBodyHeaderKey); expectedReqBody != "" {
