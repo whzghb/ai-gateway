@@ -52,8 +52,9 @@ func NewGatewayController(
 		kube:                  kube,
 		logger:                logger,
 		envoyGatewayNamespace: envoyGatewayNamespace,
-		udsPath:               udsPath,
-		extProcImage:          extProcImage,
+		// /etc/ai-gateway-extproc-uds/run.sock 和extPro路径一致
+		udsPath:      udsPath,
+		extProcImage: extProcImage,
 	}
 }
 
@@ -78,6 +79,7 @@ func (c *GatewayController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	var routes aigv1a1.AIGatewayRouteList
+	// 通过gateway快速获取与该gateway绑定的所有AIGatewayRoute
 	err := c.client.List(ctx, &routes, client.MatchingFields{
 		k8sClientIndexAIGatewayRouteToAttachedGateway: fmt.Sprintf("%s.%s", req.Name, req.Namespace),
 	})
@@ -85,11 +87,13 @@ func (c *GatewayController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
+	// 没有aigatewayroute，返回
 	if len(routes.Items) == 0 {
 		// This means that the gateway is not attached to any AIGatewayRoute.
 		c.logger.Info("No AIGatewayRoute attached to the Gateway", "namespace", gw.Namespace, "name", gw.Name)
 		return ctrl.Result{}, nil
 	}
+	// 设置extensionPolicy
 	if err := c.ensureExtensionPolicy(ctx, &gw); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -117,6 +121,7 @@ func (c *GatewayController) ensureExtensionPolicy(ctx context.Context, gw *gwapi
 	// Ensure that the backend that makes Envoy talk to the UDS exists.
 	var backend egv1a1.Backend
 	if err = c.client.Get(ctx, client.ObjectKey{Name: sideCarExtProcBackendName, Namespace: gw.Namespace}, &backend); err != nil {
+		// 如果不存在这个backend,创建它
 		if apierrors.IsNotFound(err) {
 			backend = egv1a1.Backend{
 				ObjectMeta: metav1.ObjectMeta{
@@ -124,6 +129,10 @@ func (c *GatewayController) ensureExtensionPolicy(ctx context.Context, gw *gwapi
 					Namespace: gw.Namespace,
 				},
 				Spec: egv1a1.BackendSpec{
+					// 指明使用unixsocket模式
+					// 路径为extPro的路径
+					// extPro会与envoy proxy运行在同一pod中
+					// 都挂载这个路径, 以实现共享
 					Endpoints: []egv1a1.BackendEndpoint{{Unix: &egv1a1.UnixSocket{Path: c.udsPath}}},
 				},
 			}
@@ -143,6 +152,8 @@ func (c *GatewayController) ensureExtensionPolicy(ctx context.Context, gw *gwapi
 		return fmt.Errorf("failed to get extension policy: %w", err)
 	}
 
+	// 更新EnvoyExtensionPolicy
+	// 申明extPro是envoy-ai-gateway-extproc-backend这个backend(上面创建的)
 	extPolicy := &egv1a1.EnvoyExtensionPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: perGatewayEEPName, Namespace: gw.Namespace},
 		Spec: egv1a1.EnvoyExtensionPolicySpec{
@@ -194,9 +205,11 @@ func (c *GatewayController) ensureExtensionPolicy(ctx context.Context, gw *gwapi
 }
 
 // schemaToFilterAPI converts an aigv1a1.VersionedAPISchema to filterapi.VersionedAPISchema.
+// 将schema转为filterapi.VersionAPISchema
 func schemaToFilterAPI(schema aigv1a1.VersionedAPISchema) filterapi.VersionedAPISchema {
 	ret := filterapi.VersionedAPISchema{}
 	ret.Name = filterapi.APISchemaName(schema.Name)
+	// 目前就对schema为OpenAI的做了下额外处理
 	if schema.Name == aigv1a1.APISchemaOpenAI {
 		// When the schema is OpenAI, we default to the v1 version if not specified or nil.
 		ret.Version = cmp.Or(ptr.Deref(schema.Version, "v1"), "v1")
@@ -207,60 +220,121 @@ func schemaToFilterAPI(schema aigv1a1.VersionedAPISchema) filterapi.VersionedAPI
 }
 
 // reconcileFilterConfigSecret updates the filter config secret for the external processor.
+// 配置filter-config.yaml，保存到一个secret中
 func (c *GatewayController) reconcileFilterConfigSecret(ctx context.Context, gw *gwapiv1.Gateway, aiGatewayRoutes []aigv1a1.AIGatewayRoute, uuid string) error {
 	// Precondition: aiGatewayRoutes is not empty as we early return if it is empty.
+	// basic.yaml里面只有一个name:  OpenAI, 没有version
 	input := aiGatewayRoutes[0].Spec.APISchema
 
+	// uuid为gateway的name
 	ec := &filterapi.Config{UUID: uuid}
+	// schema = name + version
+	// OpenAI默认版本为v1，所以转换后为 OpenAI + v1
 	ec.Schema = schemaToFilterAPI(input)
+	// x-ai-eg-model, 所有模型的key都为这个
 	ec.ModelNameHeaderKey = aigv1a1.AIModelHeaderKey
+	// x-ai-eg-selected-route TODO
 	ec.SelectedRouteHeaderKey = selectedRouteHeaderKey
 	var err error
+	// 记录llm，用于去重
 	llmCosts := map[string]struct{}{}
 	for i := range aiGatewayRoutes {
+		// 拿到第一个aiGatewayRoute
 		aiGatewayRoute := &aiGatewayRoutes[i]
 		spec := aiGatewayRoute.Spec
+		// 一个aiGatewayRoute有多个rules，一个rule通过匹配一定的条件，将请求发往特定的backend
 		for i := range spec.Rules {
+			// 拿到第一个rule
 			rule := &spec.Rules[i]
+			// BackendRefs对应一个aiServiceBackend，一个aiServiceBackend对应Backend(同名)，在basic.yaml里只有一个名字，其实还有权重, 优先级等
+			// 需要将rule的backendRefs转换为[]filterapi.Backend
 			backends := make([]filterapi.Backend, len(rule.BackendRefs))
 			for j := range rule.BackendRefs {
+				// 取到BackendRefs中的第j个backend
 				backendRef := &rule.BackendRefs[j]
+				// 为第j个filterapi.Backend赋值
 				b := &backends[j]
+				// 名字和rule里的backend名字一样，命名空间也一样
 				b.Name = fmt.Sprintf("%s.%s", backendRef.Name, aiGatewayRoute.Namespace)
+				// 是否使用别名，如果有的话
 				b.ModelNameOverride = backendRef.ModelNameOverride
 				var backendObj *aigv1a1.AIServiceBackend
+				// 从k8s中获取AIServiceBackend实例
 				backendObj, err = c.backend(ctx, aiGatewayRoute.Namespace, backendRef.Name)
 				if err != nil {
 					return fmt.Errorf("failed to get AIServiceBackend %s: %w", b.Name, err)
 				}
+				// 将AIServiceBackend的APISchema也转化为filter的schema
 				b.Schema = schemaToFilterAPI(backendObj.Spec.APISchema)
+				// 如果该aiServiceBackend引用了一个BackendSecurityPolicyRef
 				if bspRef := backendObj.Spec.BackendSecurityPolicyRef; bspRef != nil {
+					// 目前主要是做认证，目前适配了以下认证
+					/*
+						// BackendAuth corresponds partially to BackendSecurityPolicy in api/v1alpha1/api.go.
+						type BackendAuth struct {
+							// APIKey is a location of the api key secret file.
+							APIKey *APIKeyAuth `json:"apiKey,omitempty"`
+							// AWSAuth specifies the location of the AWS credential file and region.
+							AWSAuth *AWSAuth `json:"aws,omitempty"`
+							// AzureAuth specifies the location of Azure access token file.
+							AzureAuth *AzureAuth `json:"azure,omitempty"`
+							// GCPAuth specifies the location of GCP credential file.
+							GCPAuth *GCPAuth `json:"gcp,omitempty"`
+						}
+					*/
 					b.Auth, err = c.bspToFilterAPIBackendAuth(ctx, aiGatewayRoute.Namespace, string(bspRef.Name))
 					if err != nil {
 						return fmt.Errorf("failed to create backend auth: %w", err)
 					}
 				}
 			}
+			// 基于filter.backends构建configRule
 			configRule := filterapi.RouteRule{Backends: backends}
+			// aigatewayroute的名字 + rule + 当前rule的索引来标识一个configRule
+			// fmt.Sprintf("%s-rule-%d", aiGatewayRoute.Name, ruleIndex)
 			configRule.Name = routeName(aiGatewayRoute, i)
+			// 将rule里面配置的matches转换为configRule的headers
+			/*
+			  rules:
+			    - matches:
+			        - headers:
+			            - type: Exact
+			              name: x-ai-eg-model
+			              value: gpt-4o-mini
+			*/
 			configRule.Headers = make([]filterapi.HeaderMatch, len(rule.Matches))
 			for j, match := range rule.Matches {
 				configRule.Headers[j].Name = match.Headers[0].Name
 				configRule.Headers[j].Value = match.Headers[0].Value
 			}
+			// 如果rule.ModelsOwnedBy有设置,则使用设置的owner, 否则使用Envoy AI Gateway
 			configRule.ModelsOwnedBy = ptr.Deref(rule.ModelsOwnedBy, defaultOwnedBy)
 			// Convert to UTC time in force to avoid timezone issues.
+			// 设置创建时间
 			configRule.ModelsCreatedAt = ptr.Deref[metav1.Time](rule.ModelsCreatedAt, aiGatewayRoute.CreationTimestamp).Time.UTC()
+			// 将configRule添加到ec.Rules中 即filterapi.Config中
 			ec.Rules = append(ec.Rules, configRule)
 
+			// 如果在aiGatewayRoute中还设置了LLMRequestCosts
 			for _, cost := range aiGatewayRoute.Spec.LLMRequestCosts {
+				// 新建一个filterapi.LLMRequestCost
+				/*
+				  llmRequestCosts:
+				    - metadataKey: llm_input_token
+				      type: InputToken
+				    - metadataKey: llm_cel_calculated_token
+				      type: CEL
+				      cel: "input_tokens == uint(3) ? 100000000 : 0"
+				*/
 				fc := filterapi.LLMRequestCost{MetadataKey: cost.MetadataKey}
+				// 不能重名
 				_, ok := llmCosts[cost.MetadataKey]
 				if ok {
 					c.logger.Info("LLMRequestCost with the same metadata key already exists, skipping",
 						"metadataKey", cost.MetadataKey, "route", aiGatewayRoute.Name)
 					continue
 				}
+				// 支持以下类型
 				switch cost.Type {
 				case aigv1a1.LLMRequestCostTypeInputToken:
 					fc.Type = filterapi.LLMRequestCostTypeInputToken
@@ -280,12 +354,14 @@ func (c *GatewayController) reconcileFilterConfigSecret(ctx context.Context, gw 
 				default:
 					return fmt.Errorf("unknown request cost type: %s", cost.Type)
 				}
+				// 将filterapi.LLMRequestCost添加到ec.LLMRequestCosts中
 				ec.LLMRequestCosts = append(ec.LLMRequestCosts, fc)
 				llmCosts[cost.MetadataKey] = struct{}{}
 			}
 		}
 	}
 
+	// io.envoy.ai_gateway
 	ec.MetadataNamespace = aigv1a1.AIGatewayFilterMetadataNamespace
 
 	marshaled, err := yaml.Marshal(ec)
@@ -293,12 +369,17 @@ func (c *GatewayController) reconcileFilterConfigSecret(ctx context.Context, gw 
 		return fmt.Errorf("failed to marshal extproc config: %w", err)
 	}
 
+	// gateway的名字和命名空间
+	// fmt.Sprintf("%s-%s", gwName, gwNamespace)
 	name := FilterConfigSecretPerGatewayName(gw.Name, gw.Namespace)
 	// We need to create the filter config in Envoy Gateway system namespace because the sidecar extproc need
 	// to access it.
+	// filter-config.yaml
 	data := map[string]string{FilterConfigKeyInSecret: string(marshaled)}
+	// 保存到一个secret里面，名字为filter-config.yaml
 	secret, err := c.kube.CoreV1().Secrets(c.envoyGatewayNamespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
+		// 不存在,则创建
 		if apierrors.IsNotFound(err) {
 			secret = &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: c.envoyGatewayNamespace},
@@ -312,6 +393,7 @@ func (c *GatewayController) reconcileFilterConfigSecret(ctx context.Context, gw 
 		return fmt.Errorf("failed to get secret %s: %w", name, err)
 	}
 
+	// 存在则更新
 	secret.StringData = data
 	if _, err := c.kube.CoreV1().Secrets(c.envoyGatewayNamespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("failed to update secret %s: %w", secret.Name, err)
@@ -421,11 +503,15 @@ func (c *GatewayController) backendSecurityPolicy(ctx context.Context, namespace
 // annotateGatewayPods annotates the pods of GW with the new uuid to propagate the filter config Secret update faster.
 // If the pod doesn't have the extproc container, it will roll out the deployment altogether, which eventually ends up
 // the mutation hook invoked.
-//
+// 为网关节点（GW）的 Pod 标注新的 UUID，以便更快地除非filter config的Secret更新。
+// 如果 Pod 没有extproc容器，直接将deployment重启，最终会调用mutating webhook。
 // See https://neonmirrors.net/post/2022-12/reducing-pod-volume-update-times/ for explanation.
 func (c *GatewayController) annotateGatewayPods(ctx context.Context, gw *gwapiv1.Gateway, uuid string) error {
 	pods, err := c.kube.CoreV1().Pods(c.envoyGatewayNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("%s=%s,%s=%s",
+			// gateway.envoyproxy.io/owning-gateway-name
+			// gateway.envoyproxy.io/owning-gateway-namespace
+			// 有一个webhook会自动注入这些label
 			egOwningGatewayNameLabel, gw.Name, egOwningGatewayNamespaceLabel, gw.Namespace),
 	})
 	if err != nil {
@@ -438,6 +524,7 @@ func (c *GatewayController) annotateGatewayPods(ctx context.Context, gw *gwapiv1
 		podSpec := pod.Spec
 		for i := range podSpec.Containers {
 			// If there's an extproc container with the current target image, we don't need to roll out the deployment.
+			// ai-gateway-extproc，有这个pod，则不需要重启
 			if podSpec.Containers[i].Name == extProcContainerName && podSpec.Containers[i].Image == c.extProcImage {
 				rollout = false
 				break
@@ -445,6 +532,7 @@ func (c *GatewayController) annotateGatewayPods(ctx context.Context, gw *gwapiv1
 		}
 
 		c.logger.Info("annotating pod", "namespace", pod.Namespace, "name", pod.Name)
+		// 在annotations里面设置一个uuid
 		_, err = c.kube.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType,
 			[]byte(fmt.Sprintf(
 				`{"metadata":{"annotations":{"%s":"%s"}}}`, aigatewayUUIDAnnotationKey, uuid),
@@ -462,7 +550,7 @@ func (c *GatewayController) annotateGatewayPods(ctx context.Context, gw *gwapiv1
 		if err != nil {
 			return fmt.Errorf("failed to list deployments: %w", err)
 		}
-
+		// 给deploy打patch
 		for _, dep := range deps.Items {
 			c.logger.Info("rolling out deployment", "namespace", dep.Namespace, "name", dep.Name)
 			_, err = c.kube.AppsV1().Deployments(dep.Namespace).Patch(ctx, dep.Name, types.MergePatchType,

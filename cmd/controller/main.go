@@ -153,28 +153,34 @@ func parseAndValidateFlags(args []string) (flags, error) {
 }
 
 func main() {
+	// 初始化log
 	setupLog := ctrl.Log.WithName("setup")
 
+	// 获取命令行参数
 	flags, err := parseAndValidateFlags(os.Args[1:])
 	if err != nil {
 		setupLog.Error(err, "failed to parse and validate flags")
 		os.Exit(1)
 	}
 
+	// 控制器设置log
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: true, Level: flags.logLevel})))
 	k8sConfig := ctrl.GetConfigOrDie()
 
+	// 暴露扩展服务器监听的端口
 	lis, err := net.Listen("tcp", flags.extensionServerPort)
 	if err != nil {
 		setupLog.Error(err, "failed to listen", "port", flags.extensionServerPort)
 		os.Exit(1)
 	}
 
+	// 带有信号机制的ctx
 	ctx := ctrl.SetupSignalHandler()
 	mgrOpts := ctrl.Options{
 		Scheme:           controller.Scheme,
 		LeaderElection:   flags.enableLeaderElection,
 		LeaderElectionID: "envoy-ai-gateway-controller",
+		// webhook server设置
 		WebhookServer: webhook.NewServer(webhook.Options{
 			CertDir:  flags.tlsCertDir,
 			CertName: flags.tlsCertName,
@@ -182,27 +188,34 @@ func main() {
 			Port:     9443,
 		}),
 	}
+	// 创建一个manager
 	mgr, err := ctrl.NewManager(k8sConfig, mgrOpts)
 	if err != nil {
 		setupLog.Error(err, "failed to create manager")
 		os.Exit(1)
 	}
 
+	// 创建一个无缓存的k8s client
 	cli, err := client.New(k8sConfig, client.Options{Scheme: controller.Scheme})
 	if err != nil {
 		setupLog.Error(err, "failed to create client")
 		os.Exit(1)
 	}
+	// 将secret里面的caBundle更新到webhook里
+	// 不一样才更新,所以此处maybe
 	if err := maybePatchAdmissionWebhook(ctx, cli, filepath.Join(flags.tlsCertDir, flags.caBundleName)); err != nil {
 		setupLog.Error(err, "failed to patch admission webhook")
 		os.Exit(1)
 	}
 
 	// Start the extension server running alongside the controller.
+	// extension server和控制器一起运行
 	const extProcUDSPath = "/etc/ai-gateway-extproc-uds/run.sock"
 	s := grpc.NewServer()
 	extSrv := extensionserver.New(mgr.GetClient(), ctrl.Log, extProcUDSPath)
+	// 实现extension server的grpc服务
 	egextension.RegisterEnvoyGatewayExtensionServer(s, extSrv)
+	// health server的grpc服务
 	grpc_health_v1.RegisterHealthServer(s, extSrv)
 	go func() {
 		<-ctx.Done()
@@ -215,6 +228,7 @@ func main() {
 	}()
 
 	// Start the controller.
+	// 启动控制器
 	if err := controller.StartControllers(ctx, mgr, k8sConfig, ctrl.Log.WithName("controller"), controller.Options{
 		ExtProcImage:           flags.extProcImage,
 		ExtProcImagePullPolicy: flags.extProcImagePullPolicy,
@@ -245,6 +259,9 @@ func maybePatchAdmissionWebhook(ctx context.Context, cli client.Client, bundlePa
 		return fmt.Errorf("expected 1 webhook in %s, got %d", webhookConfigName, len(webhookCfg.Webhooks))
 	}
 
+	// 通过secret挂载到当前pod
+	// 读取secret里面的内容，更新到webhook的caBundle里面
+	// 这样就只需要维护secret即可
 	bundle, err := os.ReadFile(bundlePath)
 	if err != nil {
 		return fmt.Errorf("failed to read CA bundle: %w", err)

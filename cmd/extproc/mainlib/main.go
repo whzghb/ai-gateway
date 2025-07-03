@@ -100,6 +100,19 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 			err = nil
 		}
 	}()
+	/*
+		- args:
+		    - -configPath
+		    - /etc/filter-config/filter-config.yaml
+		    - -logLevel
+		    - info
+		    - -extProcAddr
+		    - unix:///etc/ai-gateway-extproc-uds/run.sock
+		    - -metricsPort
+		    - "1064"
+		    - -healthPort
+		    - "1065"
+	*/
 	flags, err := parseAndValidateFlags(args)
 	if err != nil {
 		return fmt.Errorf("failed to parse and validate extProcFlags: %w", err)
@@ -113,11 +126,13 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 		slog.String("configPath", flags.configPath),
 	)
 
+	// 监听在unix:///etc/ai-gateway-extproc-uds/run.sock
 	network, address := listenAddress(flags.extProcAddr)
 	lis, err := net.Listen(network, address)
 	if err != nil {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
+	// 为unix
 	if network == "unix" {
 		// Change the permission of the UDS to 0775 so that the envoy process (the same group) can access it.
 		err = os.Chmod(address, 0o775)
@@ -134,15 +149,28 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	if err != nil {
 		return fmt.Errorf("failed to create external processor server: %w", err)
 	}
+	// 注册processor
 	server.Register("/v1/chat/completions", extproc.ChatCompletionProcessorFactory(chatCompletionMetrics))
 	server.Register("/v1/embeddings", extproc.EmbeddingsProcessorFactory(embeddingsMetrics))
 	server.Register("/v1/models", extproc.NewModelsProcessor)
 
+	// 启动配置文件监听器
+	// server实现了LoadConfig方法,所以可以作为一个ConfigReceiver传入
 	if err := extproc.StartConfigWatcher(ctx, flags.configPath, server, l, time.Second*5); err != nil {
 		return fmt.Errorf("failed to start config watcher: %w", err)
 	}
 
 	s := grpc.NewServer()
+	// server需要实现Process方法
+	/*
+		type ExternalProcessorServer interface {
+			// This begins the bidirectional stream that Envoy will use to
+			// give the server control over what the filter does. The actual
+			// protocol is described by the ProcessingRequest and ProcessingResponse
+			// messages below.
+			Process(ExternalProcessor_ProcessServer) error
+		}
+	*/
 	extprocv3.RegisterExternalProcessorServer(s, server)
 	grpc_health_v1.RegisterHealthServer(s, server)
 
@@ -176,17 +204,31 @@ func listenAddress(addrFlag string) (string, string) {
 // startMetricsServer starts the HTTP server for Prometheus metrics.
 func startMetricsServer(addr string, logger *slog.Logger) (*http.Server, metric.Meter) {
 	registry := prometheus.NewRegistry()
+	/*
+		otelprom 是指 OpenTelemetry（开源可观测性框架）与 Prometheus（开源监控系统）的集成方案。它允许：
+		将 OpenTelemetry 收集的指标（Metrics）导出为 Prometheus 兼容格式
+		通过 Prometheus 生态（Grafana、Alertmanager）进行指标展示和告警
+		统一处理追踪（Traces）、指标（Metrics）和日志（Logs）的采集
+	*/
 	exporter, err := otelprom.New(otelprom.WithRegisterer(registry))
 	if err != nil {
 		log.Fatal("failed to create metrics exporter")
 	}
+	// 创建为一个提供者
 	provider := metricsdk.NewMeterProvider(metricsdk.WithReader(exporter))
+	/*
+		MeterProvider 是 OpenTelemetry 中负责管理指标（Metrics）采集、处理和导出的核心组件。它作为指标系统的入口点，主要职责包括：
+		创建和管理 Meter 实例（指标工厂）
+		配置指标处理器（Processor）和导出器（Exporter）
+		控制指标采集周期和批处理策略
+	*/
 	meter := provider.Meter("envoyproxy/ai-gateway")
 
 	// Create a new HTTP server for metrics.
 	mux := http.NewServeMux()
 
 	// Register the metrics handler.
+	// 暴露metrics接口
 	mux.Handle("/metrics", promhttp.HandlerFor(
 		registry,
 		promhttp.HandlerOpts{
@@ -195,6 +237,7 @@ func startMetricsServer(addr string, logger *slog.Logger) (*http.Server, metric.
 	))
 
 	// Add a simple health check endpoint.
+	// 健康检查接口
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))

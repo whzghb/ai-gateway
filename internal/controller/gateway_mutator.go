@@ -58,6 +58,7 @@ func (g *gatewayMutator) Default(ctx context.Context, obj runtime.Object) error 
 	if !ok {
 		panic(fmt.Sprintf("BUG: unexpected object type %T, expected *corev1.Pod", obj))
 	}
+	// gatewayapi里的约定,表示envoy proxy pod
 	gatewayName := pod.Labels[egOwningGatewayNameLabel]
 	gatewayNamespace := pod.Labels[egOwningGatewayNamespaceLabel]
 	g.logger.Info("mutating gateway pod",
@@ -78,6 +79,7 @@ const (
 
 func (g *gatewayMutator) mutatePod(ctx context.Context, pod *corev1.Pod, gatewayName, gatewayNamespace string) error {
 	var routes aigv1a1.AIGatewayRouteList
+	// 找到所有与当前gateway绑定的AIGatewayRoute
 	err := g.c.List(ctx, &routes, client.MatchingFields{
 		k8sClientIndexAIGatewayRouteToAttachedGateway: fmt.Sprintf("%s.%s", gatewayName, gatewayNamespace),
 	})
@@ -92,7 +94,9 @@ func (g *gatewayMutator) mutatePod(ctx context.Context, pod *corev1.Pod, gateway
 	podspec := &pod.Spec
 
 	// Now we construct the AI Gateway managed containers and volumes.
+	// fmt.Sprintf("%s-%s", gwName, gwNamespace)
 	filterConfigSecretName := FilterConfigSecretPerGatewayName(gatewayName, gatewayNamespace)
+	// ai-gateway-
 	filterConfigVolumeName := mutationNamePrefix + filterConfigSecretName
 	const extProcUDSVolumeName = mutationNamePrefix + "extproc-uds"
 	podspec.Volumes = append(podspec.Volumes,

@@ -64,7 +64,26 @@ func (c *AIBackendController) Reconcile(ctx context.Context, req reconcile.Reque
 // This is decoupled from the Reconcile method to centralize the error handling and status updates.
 func (c *AIBackendController) syncAIServiceBackend(ctx context.Context, aiBackend *aigv1a1.AIServiceBackend) error {
 	key := fmt.Sprintf("%s.%s", aiBackend.Name, aiBackend.Namespace)
+	/*
+		apiVersion: aigateway.envoyproxy.io/v1alpha1
+		kind: AIServiceBackend
+		metadata:
+		  name: envoy-ai-gateway-basic-openai
+		  namespace: default
+		spec:
+		  schema:
+		    name: OpenAI
+		  backendRef:
+		    name: envoy-ai-gateway-basic-openai
+		    kind: Backend
+		    group: gateway.envoyproxy.io
+		  backendSecurityPolicyRef:
+		    name: envoy-ai-gateway-basic-openai-apikey
+		    kind: BackendSecurityPolicy
+		    group: aigateway.envoyproxy.io
+	*/
 	var aiGatewayRoutes aigv1a1.AIGatewayRouteList
+	// 通过apservicebackend找到所有与之匹配的aigatewayroute
 	err := c.client.List(ctx, &aiGatewayRoutes, client.MatchingFields{k8sClientIndexBackendToReferencingAIGatewayRoute: key})
 	if err != nil {
 		return fmt.Errorf("failed to list AIGatewayRouteList: %w", err)
@@ -74,6 +93,7 @@ func (c *AIBackendController) syncAIServiceBackend(ctx context.Context, aiBacken
 			"namespace", aiGatewayRoute.Namespace, "name", aiGatewayRoute.Name,
 			"referenced_backend", aiBackend.Name, "referenced_backend_namespace", aiBackend.Namespace,
 		)
+		// 不做实际的调谐，只是当aiservicebackend发生变化时，将事件发送到aigatewayroutechan, 触发aigatewayroute的调谐
 		c.aiGatewayRouteChan <- event.GenericEvent{Object: &aiGatewayRoute}
 	}
 	return nil

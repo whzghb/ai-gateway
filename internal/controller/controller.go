@@ -75,16 +75,21 @@ type Options struct {
 // Note: this is tested with envtest, hence the test exists outside of this package. See /tests/controller_test.go.
 func StartControllers(ctx context.Context, mgr manager.Manager, config *rest.Config, logger logr.Logger, options Options) (err error) {
 	c := mgr.GetClient()
+	// 获取indexer, 用于注册自定义的额index
 	indexer := mgr.GetFieldIndexer()
 	if err = ApplyIndexing(ctx, indexer.IndexField); err != nil {
 		return fmt.Errorf("failed to apply indexing: %w", err)
 	}
 
+	// gateway事件Chan
 	gatewayEventChan := make(chan event.GenericEvent, 100)
+	// 初始化Gateway控制器
+	// ExtensionPolicy和filter-config.yaml
 	gatewayC := NewGatewayController(c, kubernetes.NewForConfigOrDie(config),
 		logger.WithName("gateway"), options.EnvoyGatewayNamespace, options.UDSPath, options.ExtProcImage)
 	if err = TypedControllerBuilderForCRD(mgr, &gwapiv1.Gateway{}).
 		// We need the annotation change event to reconcile the Gateway referenced by AIGatewayRoutes.
+		// annotation更新也需要触发事件
 		WithEventFilter(predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{})).
 		WatchesRawSource(source.Channel(
 			gatewayEventChan,
@@ -95,6 +100,7 @@ func StartControllers(ctx context.Context, mgr manager.Manager, config *rest.Con
 	}
 
 	aiGatewayRouteEventChan := make(chan event.GenericEvent, 100)
+	// aigatewayroute转换为httproute
 	routeC := NewAIGatewayRouteController(c, kubernetes.NewForConfigOrDie(config), logger.WithName("ai-gateway-route"),
 		gatewayEventChan,
 	)
@@ -109,6 +115,7 @@ func StartControllers(ctx context.Context, mgr manager.Manager, config *rest.Con
 		return fmt.Errorf("failed to create controller for AIGatewayRoute: %w", err)
 	}
 
+	// 当aiservicebackend发生变化时触发aiGatewayRoute调谐
 	aiServiceBackendEventChan := make(chan event.GenericEvent, 100)
 	backendC := NewAIServiceBackendController(c, kubernetes.NewForConfigOrDie(config), logger.
 		WithName("ai-service-backend"), aiGatewayRouteEventChan)
@@ -122,6 +129,7 @@ func StartControllers(ctx context.Context, mgr manager.Manager, config *rest.Con
 	}
 
 	backendSecurityPolicyEventChan := make(chan event.GenericEvent, 100)
+	// 轮转token
 	backendSecurityPolicyC := NewBackendSecurityPolicyController(c, kubernetes.NewForConfigOrDie(config), logger.
 		WithName("backend-security-policy"), aiServiceBackendEventChan)
 	if err = TypedControllerBuilderForCRD(mgr, &aigv1a1.BackendSecurityPolicy{}).
@@ -143,6 +151,7 @@ func StartControllers(ctx context.Context, mgr manager.Manager, config *rest.Con
 	}
 
 	if !options.DisableMutatingWebhook {
+		// patch envoy proxy, 加上extProc容器，并共享sock文件
 		h := admission.WithCustomDefaulter(Scheme, &corev1.Pod{}, newGatewayMutator(c, kubernetes.NewForConfigOrDie(config),
 			logger.WithName("gateway-mutator"),
 			options.ExtProcImage,
@@ -189,6 +198,7 @@ const (
 
 // ApplyIndexing applies indexing to the given indexer. This is exported for testing purposes.
 func ApplyIndexing(ctx context.Context, indexer func(ctx context.Context, obj client.Object, field string, extractValue client.IndexerFunc) error) error {
+	// 为各种通过reference、attach操作绑定的对象建立索引
 	err := indexer(ctx, &aigv1a1.AIGatewayRoute{},
 		k8sClientIndexBackendToReferencingAIGatewayRoute, aiGatewayRouteIndexFunc)
 	if err != nil {
@@ -215,15 +225,48 @@ func ApplyIndexing(ctx context.Context, indexer func(ctx context.Context, obj cl
 func aiGatewayRouteToAttachedGatewayIndexFunc(o client.Object) []string {
 	aiGatewayRoute := o.(*aigv1a1.AIGatewayRoute)
 	var ret []string
+	// 通过
 	for _, ref := range aiGatewayRoute.Spec.TargetRefs { // TODO: handle parentRefs per #580.
+		// ref.name + namespace唯一确认一个gateway
+		// 所以当获取到一个gateway时, 可以快速获取这个gateway下所有的AIGatewayRoute
 		ret = append(ret, fmt.Sprintf("%s.%s", ref.Name, aiGatewayRoute.Namespace))
 	}
 	return ret
 }
 
+/*
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIGatewayRoute
+metadata:
+
+	name: envoy-ai-gateway-basic
+	namespace: default
+
+spec:
+
+	schema:
+	  name: OpenAI
+	targetRefs:
+	  - name: envoy-ai-gateway-basic
+	    kind: Gateway
+	    group: gateway.networking.k8s.io
+	rules:
+	  - matches:
+	      - headers:
+	          - type: Exact
+	            name: x-ai-eg-model
+	            value: gpt-4o-mini
+	    backendRefs:
+	      - name: envoy-ai-gateway-basic-openai
+	  - matches:
+	    ...
+*/
 func aiGatewayRouteIndexFunc(o client.Object) []string {
+	// 原始对象是一个AIGatewayRoute
 	aiGatewayRoute := o.(*aigv1a1.AIGatewayRoute)
 	var ret []string
+	// 一个AIGatewayRoute有多个rule
+	// 当接收到一个aiservicebackend时，可以快速找到对应的aigatewayroute
 	for _, rule := range aiGatewayRoute.Spec.Rules {
 		for _, backend := range rule.BackendRefs {
 			key := fmt.Sprintf("%s.%s", backend.Name, aiGatewayRoute.Namespace)

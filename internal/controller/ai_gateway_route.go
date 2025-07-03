@@ -36,8 +36,9 @@ const (
 	// This will result in metadata being added to the underling Envoy route
 	// @see https://gateway.envoyproxy.io/contributions/design/metadata/
 	httpRouteBackendRefPriorityAnnotationKey = "gateway.envoyproxy.io/backend-ref-priority"
-	egOwningGatewayNameLabel                 = "gateway.envoyproxy.io/owning-gateway-name"
-	egOwningGatewayNamespaceLabel            = "gateway.envoyproxy.io/owning-gateway-namespace"
+	// gatewayapi里的约定
+	egOwningGatewayNameLabel      = "gateway.envoyproxy.io/owning-gateway-name"
+	egOwningGatewayNamespaceLabel = "gateway.envoyproxy.io/owning-gateway-namespace"
 	// apiKeyInSecret is the key to store OpenAI API key.
 	apiKeyInSecret = "apiKey"
 )
@@ -82,11 +83,14 @@ func (c *AIGatewayRouteController) Reconcile(ctx context.Context, req reconcile.
 		return ctrl.Result{}, err
 	}
 
+	// 同步aiGatewayRoute
 	if err := c.syncAIGatewayRoute(ctx, &aiGatewayRoute); err != nil {
 		c.logger.Error(err, "failed to sync AIGatewayRoute")
+		// 不成功更新为NotAccepted状态
 		c.updateAIGatewayRouteStatus(ctx, &aiGatewayRoute, aigv1a1.ConditionTypeNotAccepted, err.Error())
 		return ctrl.Result{}, err
 	}
+	// 更新为成功
 	c.updateAIGatewayRouteStatus(ctx, &aiGatewayRoute, aigv1a1.ConditionTypeAccepted, "AI Gateway Route reconciled successfully")
 	return reconcile.Result{}, nil
 }
@@ -99,15 +103,29 @@ func FilterConfigSecretPerGatewayName(gwName, gwNamespace string) string {
 // This is decoupled from the Reconcile method to centralize the error handling and status updates.
 func (c *AIGatewayRouteController) syncAIGatewayRoute(ctx context.Context, aiGatewayRoute *aigv1a1.AIGatewayRoute) error {
 	// Check if the HTTPRouteFilter exists in the namespace.
+	// 获取HTTPRouteFilter资源
+	/*
+		apiVersion: gateway.envoyproxy.io/v1alpha1
+		kind: HTTPRouteFilter
+		metadata:
+		  name: ai-eg-host-rewrite
+		  namespace: default
+		spec:
+		  urlRewrite:
+		    hostname:
+		      type: Backend
+	*/
 	var httpRouteFilter egv1a1.HTTPRouteFilter
 	err := c.client.Get(ctx,
 		client.ObjectKey{Name: hostRewriteHTTPFilterName, Namespace: aiGatewayRoute.Namespace}, &httpRouteFilter)
 	if apierrors.IsNotFound(err) {
+		// 如果不存在，创建一个，一个命名空间有且只存在一个，ai-eg-host-rewrite
 		httpRouteFilter = egv1a1.HTTPRouteFilter{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      hostRewriteHTTPFilterName,
 				Namespace: aiGatewayRoute.Namespace,
 			},
+			// hostname.Type也是固定的: Backend
 			Spec: egv1a1.HTTPRouteFilterSpec{
 				URLRewrite: &egv1a1.HTTPURLRewriteFilter{
 					Hostname: &egv1a1.HTTPHostnameModifier{
@@ -130,6 +148,7 @@ func (c *AIGatewayRouteController) syncAIGatewayRoute(ctx context.Context, aiGat
 	existingRoute := err == nil
 	if apierrors.IsNotFound(err) {
 		// This means that this AIGatewayRoute is a new one.
+		// 不存在，新创建一个httproute，一个AIGatewayRoute对应一个HTTPRoute
 		httpRoute = gwapiv1.HTTPRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      aiGatewayRoute.Name,
@@ -137,6 +156,7 @@ func (c *AIGatewayRouteController) syncAIGatewayRoute(ctx context.Context, aiGat
 			},
 			Spec: gwapiv1.HTTPRouteSpec{},
 		}
+		// 设置controllerrefrence，可以级联删除和触发调谐
 		if err = ctrlutil.SetControllerReference(aiGatewayRoute, &httpRoute, c.client.Scheme()); err != nil {
 			panic(fmt.Errorf("BUG: failed to set controller reference for HTTPRoute: %w", err))
 		}
@@ -145,16 +165,19 @@ func (c *AIGatewayRouteController) syncAIGatewayRoute(ctx context.Context, aiGat
 	}
 
 	// Update the HTTPRoute with the new AIGatewayRoute.
+	// 使用AIGatewayRoute更新或创建HTTPRoute
 	if err = c.newHTTPRoute(ctx, &httpRoute, aiGatewayRoute); err != nil {
 		return fmt.Errorf("failed to construct a new HTTPRoute: %w", err)
 	}
 
+	// 如果httproute已经存在，更新
 	if existingRoute {
 		c.logger.Info("updating HTTPRoute", "namespace", httpRoute.Namespace, "name", httpRoute.Name)
 		if err = c.client.Update(ctx, &httpRoute); err != nil {
 			return fmt.Errorf("failed to update HTTPRoute: %w", err)
 		}
 	} else {
+		// 创建
 		c.logger.Info("creating HTTPRoute", "namespace", httpRoute.Namespace, "name", httpRoute.Name)
 		if err = c.client.Create(ctx, &httpRoute); err != nil {
 			return fmt.Errorf("failed to create HTTPRoute: %w", err)
@@ -174,25 +197,71 @@ func routeName(aiGatewayRoute *aigv1a1.AIGatewayRoute, ruleIndex int) filterapi.
 
 // newHTTPRoute updates the HTTPRoute with the new AIGatewayRoute.
 func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv1.HTTPRoute, aiGatewayRoute *aigv1a1.AIGatewayRoute) error {
+	// 初始化rewriteFilters，是一个列表格式，目前只有一个，所有httproute里面的rules都共用这个rewritefilters
 	rewriteFilters := []gwapiv1.HTTPRouteFilter{{
+		// ExtensionRef
 		Type: gwapiv1.HTTPRouteFilterExtensionRef,
 		ExtensionRef: &gwapiv1.LocalObjectReference{
 			Group: "gateway.envoyproxy.io",
 			Kind:  "HTTPRouteFilter",
-			Name:  hostRewriteHTTPFilterName,
+			// ai-eg-host-rewrite
+			Name: hostRewriteHTTPFilterName,
 		},
 	}}
+	// HTTPRouteRule，如下格式
+	/*
+	  rules:
+	  - backendRefs:
+	    - group: gateway.envoyproxy.io
+	      kind: Backend
+	      name: envoy-ai-gateway-basic-openai
+	      weight: 1
+	    filters:
+	    - extensionRef:
+	        group: gateway.envoyproxy.io
+	        kind: HTTPRouteFilter
+	        name: ai-eg-host-rewrite
+	      type: ExtensionRef
+	    matches:
+	    - headers:
+	      - name: x-ai-eg-selected-route
+	        type: Exact
+	        value: envoy-ai-gateway-basic-rule-0
+	      path:
+	        type: PathPrefix
+	        value: /
+	    timeouts:
+	      request: 3s
+	*/
 	var rules []gwapiv1.HTTPRouteRule
+	// aiGatewayRoute.Spec.Rules
+	/*
+		rules:
+		    - matches:
+		        - headers:
+		            - type: Exact
+		              name: x-ai-eg-model
+		              value: gpt-4o-mini
+		      backendRefs:
+		        - name: envoy-ai-gateway-basic-openai
+	*/
+	// 将aiGatewayRoute.Spec.Rules转换为HTTPRouteRule
 	for i, rule := range aiGatewayRoute.Spec.Rules {
+		// filterapi.RouteRuleName(fmt.Sprintf("%s-rule-%d", aiGatewayRoute.Name, ruleIndex))
 		routeName := routeName(aiGatewayRoute, i)
+		// 一个rule的backendRef可以是多个，即可以对应多个backend
 		var backendRefs []gwapiv1.HTTPBackendRef
 		for i := range rule.BackendRefs {
+			// 获取第i个backend
 			br := &rule.BackendRefs[i]
+			// 目标名：backendName + namespace
 			dstName := fmt.Sprintf("%s.%s", br.Name, aiGatewayRoute.Namespace)
+			// 从k8s中获取完整backend
 			backend, err := c.backend(ctx, aiGatewayRoute.Namespace, br.Name)
 			if err != nil {
 				return fmt.Errorf("AIServiceBackend %s not found", dstName)
 			}
+			// 转换成了一个HTTPBackendRef
 			backendRefs = append(backendRefs,
 				gwapiv1.HTTPBackendRef{BackendRef: gwapiv1.BackendRef{
 					BackendObjectReference: backend.Spec.BackendRef,
@@ -200,6 +269,7 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 				}},
 			)
 		}
+		// 添加进httproute规则列表
 		rules = append(rules, gwapiv1.HTTPRouteRule{
 			BackendRefs: backendRefs,
 			Matches: []gwapiv1.HTTPRouteMatch{
@@ -218,6 +288,7 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 	//
 	// In other words, this default route is an implementation detail to make the Envoy router happy and does not affect
 	// the actual routing at all.
+	// 加一个默认规则，如果全都不匹配，返回unreachable
 	if len(rules) > 0 {
 		rules = append(rules, gwapiv1.HTTPRouteRule{
 			Name:    ptr.To[gwapiv1.SectionName]("unreachable"),
@@ -231,10 +302,26 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 		dst.ObjectMeta.Annotations = make(map[string]string)
 	}
 	// HACK: We need to set an annotation so that Envoy Gateway reconciles the HTTPRoute when the backend refs change.
+	// 为了使envoy gateway controller在HTTPRoute.backend发生变化时执行调谐
 	dst.ObjectMeta.Annotations[httpRouteBackendRefPriorityAnnotationKey] = buildPriorityAnnotation(aiGatewayRoute.Spec.Rules)
 
+	/*
+		apiVersion: aigateway.envoyproxy.io/v1alpha1
+		kind: AIGatewayRoute
+		metadata:
+		  name: envoy-ai-gateway-basic
+		  namespace: default
+		spec:
+		  schema:
+		    name: OpenAI
+		  targetRefs:
+		    - name: envoy-ai-gateway-basic
+		      kind: Gateway
+		      group: gateway.networking.k8s.io
+	*/
 	targetRefs := aiGatewayRoute.Spec.TargetRefs
 	egNs := gwapiv1.Namespace(aiGatewayRoute.Namespace)
+	// 通常设置为route想要绑定的gateway
 	parentRefs := make([]gwapiv1.ParentReference, len(targetRefs))
 	for i, egRef := range targetRefs {
 		egName := egRef.Name
@@ -252,7 +339,22 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 }
 
 func (c *AIGatewayRouteController) syncGateways(ctx context.Context, aiGatewayRoute *aigv1a1.AIGatewayRoute) error {
+	/*
+		apiVersion: aigateway.envoyproxy.io/v1alpha1
+		kind: AIGatewayRoute
+		metadata:
+		  name: envoy-ai-gateway-basic
+		  namespace: default
+		spec:
+		  schema:
+		    name: OpenAI
+		  targetRefs:
+		    - name: envoy-ai-gateway-basic
+		      kind: Gateway
+		      group: gateway.networking.k8s.io
+	*/
 	for _, t := range aiGatewayRoute.Spec.TargetRefs {
+		// 触发当前aiGatewayRoute对应的Gateway更新
 		var gw gwapiv1.Gateway
 		if err := c.client.Get(ctx, client.ObjectKey{Name: string(t.Name), Namespace: aiGatewayRoute.Namespace}, &gw); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -262,6 +364,7 @@ func (c *AIGatewayRouteController) syncGateways(ctx context.Context, aiGatewayRo
 			return fmt.Errorf("failed to get Gateway: %w", err)
 		}
 		c.logger.Info("syncing Gateway", "namespace", gw.Namespace, "name", gw.Name)
+		// 传给这个chan，aigateway控制器会监听到
 		c.gatewayEventChan <- event.GenericEvent{Object: &gw}
 	}
 	return nil

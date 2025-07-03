@@ -81,12 +81,14 @@ func (c *BackendSecurityPolicyController) Reconcile(ctx context.Context, req ctr
 
 // reconcile reconciles BackendSecurityPolicy but extracted from Reconcile to centralize error handling.
 func (c *BackendSecurityPolicyController) reconcile(ctx context.Context, bsp *aigv1a1.BackendSecurityPolicy) (res ctrl.Result, err error) {
+	// 如果不是APIKey
 	if bsp.Spec.Type != aigv1a1.BackendSecurityPolicyTypeAPIKey {
 		res, err = c.rotateCredential(ctx, bsp)
 		if err != nil {
 			return res, err
 		}
 	}
+	// 是APIKey
 	err = c.syncBackendSecurityPolicy(ctx, bsp)
 	return res, err
 }
@@ -241,6 +243,7 @@ func backendSecurityPolicyKey(namespace, name string) string {
 }
 
 func (c *BackendSecurityPolicyController) syncBackendSecurityPolicy(ctx context.Context, bsp *aigv1a1.BackendSecurityPolicy) error {
+	// fmt.Sprintf("%s.%s", name, namespace)
 	key := backendSecurityPolicyKey(bsp.Namespace, bsp.Name)
 	var aiServiceBackends aigv1a1.AIServiceBackendList
 	err := c.client.List(ctx, &aiServiceBackends, client.MatchingFields{k8sClientIndexBackendSecurityPolicyToReferencingAIServiceBackend: key})
@@ -250,6 +253,7 @@ func (c *BackendSecurityPolicyController) syncBackendSecurityPolicy(ctx context.
 	for i := range aiServiceBackends.Items {
 		aiBackend := &aiServiceBackends.Items[i]
 		c.logger.Info("Syncing AIServiceBackend", "namespace", aiBackend.Namespace, "name", aiBackend.Name)
+		// 触发aiServiceBackend调谐
 		c.aiServiceBackendEventChan <- event.GenericEvent{Object: aiBackend}
 	}
 	return nil

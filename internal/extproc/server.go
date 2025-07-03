@@ -57,6 +57,7 @@ func NewServer(logger *slog.Logger) (*Server, error) {
 }
 
 // LoadConfig updates the configuration of the external processor.
+// 更新extProc的配置
 func (s *Server) LoadConfig(ctx context.Context, config *filterapi.Config) error {
 	rt, err := router.New(config, x.NewCustomRouter)
 	if err != nil {
@@ -84,6 +85,7 @@ func (s *Server) LoadConfig(ctx context.Context, config *filterapi.Config) error
 				continue
 			}
 			declaredModels = append(declaredModels, model{
+				// h.Value是模型名：gpt-4o-mini
 				name:      h.Value,
 				createdAt: createdAt,
 				ownedBy:   ownedBy,
@@ -92,6 +94,7 @@ func (s *Server) LoadConfig(ctx context.Context, config *filterapi.Config) error
 
 		for _, backend := range r.Backends {
 			b := backend
+			// 需要实现一个Do方法
 			var h backendauth.Handler
 			if b.Auth != nil {
 				h, err = backendauth.NewHandler(ctx, b.Auth)
@@ -99,6 +102,8 @@ func (s *Server) LoadConfig(ctx context.Context, config *filterapi.Config) error
 					return fmt.Errorf("cannot create backend auth handler: %w", err)
 				}
 			}
+			// 如果没有auth？
+			// b.Name:  fmt.Sprintf("%s.%s", backendRef.Name, aiGatewayRoute.Namespace)
 			backends[b.Name] = &processorConfigBackend{b: &b, handler: h}
 		}
 	}
@@ -113,6 +118,7 @@ func (s *Server) LoadConfig(ctx context.Context, config *filterapi.Config) error
 				return fmt.Errorf("cannot create CEL program for cost: %w", err)
 			}
 		}
+		// 记录costs
 		costs = append(costs, processorConfigRequestCost{LLMRequestCost: c, celProg: prog})
 	}
 
@@ -141,8 +147,15 @@ func (s *Server) Register(path string, newProcessor ProcessorFactory) {
 func (s *Server) processorForPath(requestHeaders map[string]string, isUpstreamFilter bool) (Processor, error) {
 	pathHeader := ":path"
 	if isUpstreamFilter {
+		// x-ai-eg-original-path
 		pathHeader = originalPathHeader
 	}
+	// 有三种path
+	/*
+		server.Register("/v1/chat/completions", extproc.ChatCompletionProcessorFactory(chatCompletionMetrics))
+		server.Register("/v1/embeddings", extproc.EmbeddingsProcessorFactory(embeddingsMetrics))
+		server.Register("/v1/models", extproc.NewModelsProcessor)
+	*/
 	path := requestHeaders[pathHeader]
 	newProcessor, ok := s.processorFactories[path]
 	if !ok {
@@ -153,6 +166,7 @@ func (s *Server) processorForPath(requestHeaders map[string]string, isUpstreamFi
 
 // originalPathHeader is the header used to pass the original path to the processor.
 // This is used in the upstream filter level to determine the original path of the request on retry.
+// 用于重试
 const originalPathHeader = "x-ai-eg-original-path"
 
 // Process implements [extprocv3.ExternalProcessorServer].
@@ -167,7 +181,21 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	// an earlier filter has already processed the request headers/bodies and decided to terminate
 	// the request by sending an immediate response. In this case, we will use the passThroughProcessor
 	// to pass the request through without any processing as there would be nothing to process from AI Gateway's perspective.
+	// processor会在第一次接收到请求头的时候创建
+	// :path头用来区分不同的processor
+	/*
+		如果外部处理过滤器（extproc filter）在未经过请求头阶段（RequestHeaders phase）的情况下被调用，这意味着之前的过滤器已经处理了请求头或请求体，
+		并决定通过发送即时响应来终止该请求。在这种情况下，我们将使用透传处理器（passThroughProcessor）让请求直接通过，不对其进行任何处理，
+		因为从 AI 网关的角度来看，此时已没有什么需要处理的内容。
+	*/
 	var p Processor = passThroughProcessor{}
+	/*
+		特性	    下游过滤器（Downstream）	上游过滤器（Upstream）
+		处理方向	客户端 → Envoy	        Envoy → 上游服务
+		典型应用	认证、限流、请求路由	    协议转换、负载均衡
+		配置位置	http_filters	        cluster 或 route
+		生命周期	每个客户端连接            每个上游连接
+	*/
 	var isUpstreamFilter bool
 	var reqID string
 	var logger *slog.Logger
@@ -185,8 +213,9 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			return ctx.Err()
 		default:
 		}
-
+		// 接收消息：请求header、请求body、响应header、响应body
 		req, err := stream.Recv()
+		// 如果是结束标志或者状态码为cancel，返回nil
 		if errors.Is(err, io.EOF) || status.Code(err) == codes.Canceled {
 			return nil
 		} else if err != nil {
@@ -199,22 +228,29 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		// Note that `req.GetRequestHeaders()` will only return non-nil if the request is
 		// of type `ProcessingRequest_RequestHeaders`, so this will be executed only once per
 		// request, and the processor will be instantiated only once.
+		// 如果接收到的是request header，使用:path头来判断用哪个processor
 		if headers := req.GetRequestHeaders().GetHeaders(); headers != nil {
+			// 将request.headers转换为map格式
 			headersMap := headersToMap(headers)
+			// 获取请求id
 			reqID = headersMap["x-request-id"]
 			// Assume that when attributes are set, this stream is for the upstream filter level.
+			// 如果attributes不为nil，则表示是上游filter
 			isUpstreamFilter = req.GetAttributes() != nil
+			// 获取匹配的processor
 			p, err = s.processorForPath(headersMap, isUpstreamFilter)
 			if err != nil {
 				s.logger.Error("cannot get processor", slog.String("error", err.Error()))
 				return status.Error(codes.NotFound, err.Error())
 			}
 			if isUpstreamFilter {
+				// 如果是上游filter
 				if err = s.setBackend(ctx, p, reqID, req); err != nil {
 					s.logger.Error("error processing request message", slog.String("error", err.Error()))
 					return status.Errorf(codes.Unknown, "error processing request message: %v", err)
 				}
 			} else {
+				// 不是上游filter，记录reqid和对应的processor
 				s.routerProcessorsPerReqIDMutex.Lock()
 				s.routerProcessorsPerReqID[reqID] = p
 				s.routerProcessorsPerReqIDMutex.Unlock()
@@ -296,6 +332,7 @@ func (s *Server) setBackend(ctx context.Context, p Processor, reqID string, req 
 	}
 
 	// This should contain the endpoint metadata.
+	// 应该包含上游主机端点
 	hostMetadata, ok := attributes.Fields["xds.upstream_host_metadata"]
 	if !ok {
 		return status.Error(codes.Internal, "missing xds.upstream_host_metadata in request")
@@ -308,6 +345,30 @@ func (s *Server) setBackend(ctx context.Context, p Processor, reqID string, req 
 		panic(err)
 	}
 
+	/*
+		在extensionserver里设置的
+		for _, endpoint := range endpoints.LbEndpoints {
+			if endpoint.Metadata == nil {
+				endpoint.Metadata = &corev3.Metadata{}
+			}
+			if endpoint.Metadata.FilterMetadata == nil {
+				endpoint.Metadata.FilterMetadata = make(map[string]*structpb.Struct)
+			}
+			m, ok := endpoint.Metadata.FilterMetadata["aigateway.envoy.io"]
+			if !ok {
+				// 如果没有这个元数据，增加一个空的
+				m = &structpb.Struct{}
+				endpoint.Metadata.FilterMetadata["aigateway.envoy.io"] = m
+			}
+			if m.Fields == nil {
+				m.Fields = make(map[string]*structpb.Value)
+			}
+			// 设置backend_name为aibackend的name和aigatewayRoute的namespace
+			// aibackend的名字和backend的名字一样，所以也可以说是backend的name
+			// 这个backend_name会在extproc中用到
+			m.Fields["backend_name"] = structpb.NewStringValue(fmt.Sprintf("%s.%s", name, namespace))
+		}
+	*/
 	aiGatewayEndpointMetadata, ok := metadata.FilterMetadata["aigateway.envoy.io"]
 	if !ok {
 		return status.Error(codes.Internal, "missing aigateway.envoy.io metadata")
@@ -316,6 +377,7 @@ func (s *Server) setBackend(ctx context.Context, p Processor, reqID string, req 
 	if !ok {
 		return status.Error(codes.Internal, "missing backend_name in endpoint metadata")
 	}
+	// 获取到特定的handler和backend
 	backend, ok := s.config.backends[backendName.GetStringValue()]
 	if !ok {
 		return status.Errorf(codes.Internal, "unknown backend: %s", backendName.GetStringValue())
@@ -323,6 +385,7 @@ func (s *Server) setBackend(ctx context.Context, p Processor, reqID string, req 
 
 	s.routerProcessorsPerReqIDMutex.RLock()
 	defer s.routerProcessorsPerReqIDMutex.RUnlock()
+	// 通过reqid确定使用那个processor
 	routerProcessor, ok := s.routerProcessorsPerReqID[reqID]
 	if !ok {
 		return status.Errorf(codes.Internal, "no router processor found, request_id=%s, backend=%s",

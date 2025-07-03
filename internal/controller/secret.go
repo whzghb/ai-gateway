@@ -60,6 +60,7 @@ func (c *secretController) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 // syncSecret syncs the state of all resource referencing the given secret.
 func (c *secretController) syncSecret(ctx context.Context, namespace, name string) error {
 	var backendSecurityPolicies aigv1a1.BackendSecurityPolicyList
+	// 找到所有引用了当前secret的backendSecurityPolicies
 	err := c.client.List(ctx, &backendSecurityPolicies,
 		client.MatchingFields{
 			k8sClientIndexSecretToReferencingBackendSecurityPolicy: backendSecurityPolicyKey(namespace, name),
@@ -72,6 +73,7 @@ func (c *secretController) syncSecret(ctx context.Context, namespace, name strin
 		backendSecurityPolicy := &backendSecurityPolicies.Items[i]
 		c.logger.Info("Syncing BackendSecurityPolicy",
 			"namespace", backendSecurityPolicy.Namespace, "name", backendSecurityPolicy.Name)
+		// 触发backendSecurityPolicy调谐
 		c.backendSecurityPolicyEventChan <- event.GenericEvent{Object: backendSecurityPolicy}
 	}
 	return nil

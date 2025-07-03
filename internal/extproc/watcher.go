@@ -66,6 +66,7 @@ func (cw *configWatcher) watch(ctx context.Context, tick time.Duration) {
 // loadConfig loads a new config from the given path and updates the Receiver by
 // calling the [Receiver.Load].
 func (cw *configWatcher) loadConfig(ctx context.Context) error {
+	// gateway controller里面创建并更新的filter-config.yaml
 	var cfg *filterapi.Config
 	stat, err := os.Stat(cw.path)
 	switch {
